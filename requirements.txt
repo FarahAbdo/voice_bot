@@ -1,0 +1,5 @@
+pyaudio
+google-genai
+python-dotenv
+numpy
+streamlit
