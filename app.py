@@ -1,31 +1,36 @@
-import os
-import asyncio
-import logging
 import streamlit as st
-import base64
-import wave
-import io
+import asyncio
+import os
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from audio_component import audio_component
+import base64
+import io
 
-# SETUP
-logging.basicConfig(level=logging.ERROR)
-os.environ["GRPC_VERBOSITY"] = "ERROR"
-os.environ["GLOG_minloglevel"] = "2"
-
+# Load environment variables
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-if not GEMINI_API_KEY:
-    # Try getting from Streamlit secrets
-    GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY")
-    if not GEMINI_API_KEY:
-        st.error("Missing GEMINI_API_KEY. Please add it to .env or Streamlit secrets.")
-        st.stop()
+# Page configuration
+st.set_page_config(
+    page_title="Gemini Voice Assistant",
+    page_icon="🎤",
+    layout="centered"
+)
 
-# SYSTEM PROMPT (Jordanian Dialect)
+# Initialize session state
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+if 'audio_response' not in st.session_state:
+    st.session_state.audio_response = None
+
+# Get API key
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') or st.secrets.get("GEMINI_API_KEY", "")
+
+if not GEMINI_API_KEY:
+    st.error("❌ Missing GEMINI_API_KEY. Please add it to Streamlit secrets or .env file.")
+    st.stop()
+
+# System prompt
 SYSTEM_INSTRUCTION = (
     "You are a helpful voice assistant BE FRIENDLY and helpful voice assistant. "
     "Speak naturally and conversationally. "
@@ -36,99 +41,112 @@ SYSTEM_INSTRUCTION = (
     "4. Do NOT wait. Speak immediately."
 )
 
-class GeminiBot:
-    def __init__(self):
-        self.client = genai.Client(api_key=GEMINI_API_KEY)
-        self.chat = self.client.chats.create(
-            model="gemini-2.0-flash-exp",
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name="Charon"
+# Title and description
+st.title("🎤 Gemini Voice Assistant")
+st.markdown("**Jordanian Arabic Voice Bot** - Record your voice and get responses!")
+
+# Audio input
+audio_bytes = st.audio_input("🎙️ Click to record your voice")
+
+if audio_bytes:
+    st.audio(audio_bytes, format="audio/wav")
+    
+    if st.button("🚀 Send to Gemini", type="primary"):
+        with st.spinner("Processing your audio..."):
+            try:
+                # Initialize Gemini client
+                client = genai.Client(api_key=GEMINI_API_KEY)
+                
+                # Read audio bytes
+                audio_data = audio_bytes.read()
+                
+                # Create config
+                config = types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_modalities=["TEXT", "AUDIO"],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                                voice_name="Charon"
+                            )
                         )
                     )
                 )
-            )
-        )
-
-    def process_audio(self, audio_bytes):
-        """Send audio to Gemini and get audio response"""
-        try:
-            # Send audio part
-            response = self.chat.send_message(
-                message=types.Part(
-                    inline_data=types.Blob(
-                        data=audio_bytes,
-                        mime_type="audio/pcm"
-                    )
+                
+                # Send audio to Gemini
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash-exp",
+                    contents=[
+                        types.Content(
+                            parts=[
+                                types.Part.from_bytes(
+                                    data=audio_data,
+                                    mime_type="audio/wav"
+                                )
+                            ]
+                        )
+                    ],
+                    config=config
                 )
-            )
-            
-            # Extract audio from response
-            for part in response.parts:
-                if part.inline_data:
-                    return part.inline_data.data
-            return None
-            
-        except Exception as e:
-            st.error(f"Gemini Error: {e}")
-            return None
+                
+                # Extract text and audio response
+                text_response = ""
+                audio_response = None
+                
+                for part in response.candidates[0].content.parts:
+                    if part.text:
+                        text_response += part.text
+                    if hasattr(part, 'inline_data') and part.inline_data:
+                        audio_response = part.inline_data.data
+                
+                # Display results
+                st.success("✅ Response received!")
+                
+                if text_response:
+                    st.markdown("### 🤖 Bot Response:")
+                    st.markdown(f"**{text_response}**")
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": text_response
+                    })
+                
+                if audio_response:
+                    st.markdown("### 🔊 Audio Response:")
+                    # Convert audio bytes to playable format
+                    audio_b64 = base64.b64encode(audio_response).decode()
+                    audio_html = f'<audio controls autoplay><source src="data:audio/wav;base64,{audio_b64}" type="audio/wav"></audio>'
+                    st.markdown(audio_html, unsafe_allow_html=True)
+                
+            except Exception as e:
+                st.error(f"❌ Error: {str(e)}")
+                st.exception(e)
 
-def pcm_to_wav(pcm_data, sample_rate=24000):
-    """Convert raw PCM to WAV for browser playback"""
-    wav_io = io.BytesIO()
-    with wave.open(wav_io, 'wb') as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(2)  # 16-bit
-        wav_file.setframerate(sample_rate)
-        wav_file.writeframes(pcm_data)
-    return wav_io.getvalue()
+# Display conversation history
+if st.session_state.messages:
+    st.markdown("---")
+    st.markdown("### 💬 Conversation History")
+    for msg in st.session_state.messages:
+        if msg["role"] == "assistant":
+            st.markdown(f"🤖 **Bot:** {msg['content']}")
 
-# Streamlit UI
-st.set_page_config(page_title="Gemini Voice Assistant", page_icon="🎤", layout="wide")
-st.title("🎤 Gemini Voice Assistant (Jordanian Dialect)")
-st.caption("Running entirely on Streamlit Cloud (Turn-Based Mode)")
+# Clear history button
+if st.button("🗑️ Clear History"):
+    st.session_state.messages = []
+    st.rerun()
 
-# Initialize session state
-if 'bot' not in st.session_state:
-    st.session_state.bot = GeminiBot()
-if 'audio_response' not in st.session_state:
-    st.session_state.audio_response = None
+# Instructions
+with st.expander("ℹ️ How to use"):
+    st.markdown("""
+    1. Click on the microphone button to record your voice
+    2. Speak in Jordanian Arabic dialect
+    3. Click "Send to Gemini" to get a response
+    4. Listen to the audio response and read the text
+    
+    **Note:** Make sure to add your `GEMINI_API_KEY` to Streamlit secrets:
+    - Go to your app settings
+    - Add to secrets: `GEMINI_API_KEY = "your-key-here"`
+    """)
 
-# Audio Component
-# This component handles recording and playback
-# It returns the recorded audio data (base64) when silence is detected
-audio_input_base64 = audio_component(
-    audio_output_base64=st.session_state.audio_response,
-    key="audio_comp"
-)
-
-# Process Input
-if audio_input_base64:
-    # Decode base64 PCM from browser
-    try:
-        audio_bytes = base64.b64decode(audio_input_base64)
-        
-        # Send to Gemini
-        with st.spinner("🤖 Thinking..."):
-            response_pcm = st.session_state.bot.process_audio(audio_bytes)
-        
-        if response_pcm:
-            # Convert Gemini's PCM (24kHz) to WAV for browser
-            wav_data = pcm_to_wav(response_pcm, sample_rate=24000)
-            wav_base64 = base64.b64encode(wav_data).decode('utf-8')
-            
-            # Update state to trigger playback in component
-            st.session_state.audio_response = wav_base64
-            st.rerun()
-            
-    except Exception as e:
-        st.error(f"Processing Error: {e}")
-
-# Reset audio response after it's been sent to component
-# This prevents infinite loops of playback
-if st.session_state.audio_response and audio_input_base64 is None:
-    st.session_state.audio_response = None
+# Footer
+st.markdown("---")
+st.markdown("Built with ❤️ using Streamlit and Google Gemini")
