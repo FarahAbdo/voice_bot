@@ -1,9 +1,13 @@
 import streamlit.components.v1 as components
+import json
+import base64
 
-def audio_component(websocket_url):
+def audio_component(audio_output_base64=None, key=None):
     """
-    Custom Streamlit component for browser audio capture and playback
-    Uses Web Audio API for low-latency real-time audio streaming
+    Custom Streamlit component for turn-based audio interaction.
+    - Records audio until silence is detected.
+    - Sends audio to Python backend.
+    - Plays audio received from Python backend.
     """
     
     component_html = f"""
@@ -13,15 +17,17 @@ def audio_component(websocket_url):
         <style>
             body {{
                 margin: 0;
-                padding: 20px;
+                padding: 10px;
                 font-family: sans-serif;
                 background: transparent;
+                color: white;
             }}
             #status {{
                 padding: 10px;
                 margin-bottom: 10px;
                 border-radius: 5px;
                 font-size: 14px;
+                text-align: center;
             }}
             #visualizer {{
                 width: 100%;
@@ -30,109 +36,200 @@ def audio_component(websocket_url):
                 border-radius: 5px;
                 margin-top: 10px;
             }}
-            .status-connecting {{ background: #FFA500; color: white; }}
-            .status-connected {{ background: #4CAF50; color: white; }}
+            .status-listening {{ background: #FFA500; color: white; animation: pulse 2s infinite; }}
+            .status-processing {{ background: #2196F3; color: white; }}
+            .status-playing {{ background: #4CAF50; color: white; }}
             .status-error {{ background: #f44336; color: white; }}
+            
+            @keyframes pulse {{
+                0% {{ opacity: 1; }}
+                50% {{ opacity: 0.6; }}
+                100% {{ opacity: 1; }}
+            }}
         </style>
     </head>
     <body>
-        <div id="status" class="status-connecting">Initializing...</div>
+        <div id="status" class="status-listening">Initializing...</div>
         <canvas id="visualizer"></canvas>
         
         <script>
+            // Streamlit communication helper
+            function sendMessageToStreamlit(data) {{
+                window.parent.postMessage({{
+                    type: "streamlit:setComponentValue",
+                    value: data,
+                    dataType: "json"
+                }}, "*");
+            }}
+
             const statusDiv = document.getElementById('status');
             const canvas = document.getElementById('visualizer');
             const canvasCtx = canvas.getContext('2d');
             
             let audioContext;
             let mediaStream;
-            let audioWorkletNode;
-            let websocket;
-            let audioQueue = [];
-            let isPlaying = false;
-            let currentSource = null;
-            let nextPlayTime = 0;
+            let analyser;
+            let processor;
+            let audioInputData = [];
+            let isRecording = false;
+            let silenceStart = null;
+            let silenceThreshold = 0.02; // Adjust for sensitivity
+            let silenceDuration = 1500; // 1.5 seconds of silence to stop
             
-            // WebSocket connection
-            const wsUrl = '{websocket_url}';
+            // Audio output from Python
+            const audioOutputBase64 = "{audio_output_base64 or ''}";
             
             function updateStatus(message, className) {{
                 statusDiv.textContent = message;
                 statusDiv.className = className;
             }}
             
-            // Initialize audio context and microphone
             async function initAudio() {{
                 try {{
-                    // Create audio context with browser's native sample rate (usually 48kHz)
                     audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                    console.log('Audio Context Sample Rate:', audioContext.sampleRate);
                     
-                    // Get microphone access
+                    // Get microphone
                     mediaStream = await navigator.mediaDevices.getUserMedia({{
                         audio: {{
                             echoCancellation: true,
                             noiseSuppression: true,
-                            channelCount: 1
+                            autoGainControl: true
                         }}
                     }});
                     
                     const source = audioContext.createMediaStreamSource(mediaStream);
-                    const analyser = audioContext.createAnalyser();
+                    analyser = audioContext.createAnalyser();
                     analyser.fftSize = 2048;
                     source.connect(analyser);
                     
-                    // Create processor for capturing audio
-                    const processor = audioContext.createScriptProcessor(512, 1, 1);
-                    source.connect(processor);
-                    processor.connect(audioContext.destination);
-                    
                     // Visualizer
-                    visualize(analyser);
+                    visualize();
                     
-                    // Send audio to WebSocket
-                    processor.onaudioprocess = (e) => {{
-                        if (websocket && websocket.readyState === WebSocket.OPEN) {{
-                            const inputData = e.inputBuffer.getChannelData(0);
-                            
-                            // Downsample to 16kHz if needed
-                            const targetSampleRate = 16000;
-                            const inputSampleRate = audioContext.sampleRate;
-                            const ratio = inputSampleRate / targetSampleRate;
-                            
-                            let outputData;
-                            if (ratio > 1) {{
-                                // Need to downsample
-                                const outputLength = Math.floor(inputData.length / ratio);
-                                outputData = new Float32Array(outputLength);
-                                for (let i = 0; i < outputLength; i++) {{
-                                    const srcIndex = Math.floor(i * ratio);
-                                    outputData[i] = inputData[srcIndex];
-                                }}
-                            }} else {{
-                                outputData = inputData;
-                            }}
-                            
-                            // Convert float32 to int16 PCM
-                            const pcmData = new Int16Array(outputData.length);
-                            for (let i = 0; i < outputData.length; i++) {{
-                                pcmData[i] = Math.max(-32768, Math.min(32767, outputData[i] * 32768));
-                            }}
-                            websocket.send(pcmData.buffer);
-                        }}
-                    }};
-                    
-                    updateStatus('🎤 Microphone active - Connecting to server...', 'status-connecting');
-                    connectWebSocket();
+                    // If we have audio to play, play it first
+                    if (audioOutputBase64) {{
+                        playAudioResponse(audioOutputBase64);
+                    }} else {{
+                        startRecording();
+                    }}
                     
                 }} catch (error) {{
-                    updateStatus('❌ Microphone access denied: ' + error.message, 'status-error');
-                    console.error('Audio initialization error:', error);
+                    updateStatus('❌ Microphone access denied', 'status-error');
+                    console.error(error);
                 }}
             }}
             
-            // Visualizer
-            function visualize(analyser) {{
+            function startRecording() {{
+                if (isRecording) return;
+                
+                audioInputData = [];
+                isRecording = true;
+                silenceStart = null;
+                updateStatus('🎤 Listening...', 'status-listening');
+                
+                // Use ScriptProcessor for raw audio access (simpler than AudioWorklet for this)
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+                
+                processor.onaudioprocess = (e) => {{
+                    if (!isRecording) return;
+                    
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    
+                    // Check for silence
+                    let sum = 0;
+                    for (let i = 0; i < inputData.length; i++) {{
+                        sum += inputData[i] * inputData[i];
+                    }}
+                    const rms = Math.sqrt(sum / inputData.length);
+                    
+                    if (rms < silenceThreshold) {{
+                        if (!silenceStart) silenceStart = Date.now();
+                        else if (Date.now() - silenceStart > silenceDuration) {{
+                            // Silence detected for long enough
+                            stopRecordingAndSend();
+                        }}
+                    }} else {{
+                        silenceStart = null; // Reset silence timer
+                    }}
+                    
+                    // Downsample and store data (simple decimation)
+                    // Browser is usually 44.1k or 48k, we want ~16k for efficiency
+                    const ratio = Math.floor(audioContext.sampleRate / 16000);
+                    for (let i = 0; i < inputData.length; i += ratio) {{
+                        audioInputData.push(inputData[i]);
+                    }}
+                }};
+            }}
+            
+            function stopRecordingAndSend() {{
+                if (!isRecording) return;
+                isRecording = false;
+                
+                if (processor) {{
+                    processor.disconnect();
+                    processor.onaudioprocess = null;
+                }}
+                
+                updateStatus('🤖 Processing...', 'status-processing');
+                
+                // Convert float array to base64 PCM (16-bit)
+                const pcmData = new Int16Array(audioInputData.length);
+                for (let i = 0; i < audioInputData.length; i++) {{
+                    // Clamp and scale
+                    let s = Math.max(-1, Math.min(1, audioInputData[i]));
+                    pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }}
+                
+                // Convert to binary string then base64
+                let binary = '';
+                const bytes = new Uint8Array(pcmData.buffer);
+                const len = bytes.byteLength;
+                for (let i = 0; i < len; i++) {{
+                    binary += String.fromCharCode(bytes[i]);
+                }}
+                const base64Data = btoa(binary);
+                
+                // Send to Python
+                sendMessageToStreamlit(base64Data);
+            }}
+            
+            async function playAudioResponse(base64Audio) {{
+                updateStatus('🔊 Speaking...', 'status-playing');
+                
+                try {{
+                    // Decode base64
+                    const binaryString = atob(base64Audio);
+                    const len = binaryString.length;
+                    const bytes = new Uint8Array(len);
+                    for (let i = 0; i < len; i++) {{
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }}
+                    
+                    // Decode audio data (assuming WAV or compatible format from Gemini)
+                    // Note: Gemini sends raw PCM usually, but we'll handle WAV container in Python
+                    const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+                    
+                    const source = audioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(audioContext.destination);
+                    
+                    source.onended = () => {{
+                        // Start listening again after speaking
+                        startRecording();
+                    }};
+                    
+                    source.start(0);
+                    
+                }} catch (e) {{
+                    console.error("Playback error", e);
+                    // If decode fails (raw PCM?), try raw playback or just restart recording
+                    startRecording();
+                }}
+            }}
+            
+            function visualize() {{
                 const bufferLength = analyser.frequencyBinCount;
                 const dataArray = new Uint8Array(bufferLength);
                 
@@ -147,7 +244,7 @@ def audio_component(websocket_url):
                     canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
                     
                     canvasCtx.lineWidth = 2;
-                    canvasCtx.strokeStyle = '#4CAF50';
+                    canvasCtx.strokeStyle = isRecording ? '#FFA500' : '#4CAF50';
                     canvasCtx.beginPath();
                     
                     const sliceWidth = canvas.width / bufferLength;
@@ -157,11 +254,8 @@ def audio_component(websocket_url):
                         const v = dataArray[i] / 128.0;
                         const y = v * canvas.height / 2;
                         
-                        if (i === 0) {{
-                            canvasCtx.moveTo(x, y);
-                        }} else {{
-                            canvasCtx.lineTo(x, y);
-                        }}
+                        if (i === 0) canvasCtx.moveTo(x, y);
+                        else canvasCtx.lineTo(x, y);
                         
                         x += sliceWidth;
                     }}
@@ -169,135 +263,15 @@ def audio_component(websocket_url):
                     canvasCtx.lineTo(canvas.width, canvas.height / 2);
                     canvasCtx.stroke();
                 }}
-                
                 draw();
             }}
             
-            // WebSocket connection
-            function connectWebSocket() {{
-                websocket = new WebSocket(wsUrl);
-                websocket.binaryType = 'arraybuffer';
-                
-                websocket.onopen = () => {{
-                    updateStatus('✅ Connected - Speak now!', 'status-connected');
-                }};
-                
-                websocket.onmessage = (event) => {{
-                    // Receive audio from Gemini
-                    playAudio(event.data);
-                }};
-                
-                websocket.onerror = (error) => {{
-                    updateStatus('❌ Connection error', 'status-error');
-                    console.error('WebSocket error:', error);
-                }};
-                
-                websocket.onclose = () => {{
-                    updateStatus('⚠️ Disconnected', 'status-error');
-                    setTimeout(connectWebSocket, 3000);  // Reconnect after 3s
-                }};
-            }}
-            
-            // Play next audio in queue (sequential playback)
-            function playNextInQueue() {{
-                if (audioQueue.length === 0) {{
-                    isPlaying = false;
-                    currentSource = null;
-                    return;
-                }}
-                
-                isPlaying = true;
-                const audioBuffer = audioQueue.shift();
-                
-                // Stop any currently playing audio to prevent overlap
-                if (currentSource) {{
-                    try {{
-                        currentSource.stop();
-                    }} catch (e) {{
-                        // Already stopped or not started
-                    }}
-                }}
-                
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-                
-                currentSource = source;
-                
-                // When this chunk finishes, play the next one
-                source.onended = () => {{
-                    playNextInQueue();
-                }};
-                
-                // Schedule playback
-                const currentTime = audioContext.currentTime;
-                if (nextPlayTime < currentTime) {{
-                    nextPlayTime = currentTime;
-                }}
-                
-                source.start(nextPlayTime);
-                nextPlayTime += audioBuffer.duration;
-            }}
-            
-            // Play received audio
-            async function playAudio(audioData) {{
-                try {{
-                    if (!audioContext) return;
-                    
-                    // Gemini sends audio at 24kHz as Int16 PCM
-                    const geminiSampleRate = 24000;
-                    const pcm16 = new Int16Array(audioData);
-                    
-                    // Convert Int16 to Float32
-                    const sourceFloat32 = new Float32Array(pcm16.length);
-                    for (let i = 0; i < pcm16.length; i++) {{
-                        sourceFloat32[i] = pcm16[i] / 32768.0;
-                    }}
-                    
-                    // Resample to AudioContext sample rate if needed
-                    const targetSampleRate = audioContext.sampleRate;
-                    let outputFloat32;
-                    let outputLength;
-                    
-                    if (geminiSampleRate !== targetSampleRate) {{
-                        // Need to resample
-                        const ratio = targetSampleRate / geminiSampleRate;
-                        outputLength = Math.floor(sourceFloat32.length * ratio);
-                        outputFloat32 = new Float32Array(outputLength);
-                        
-                        for (let i = 0; i < outputLength; i++) {{
-                            const srcIndex = Math.floor(i / ratio);
-                            if (srcIndex < sourceFloat32.length) {{
-                                outputFloat32[i] = sourceFloat32[srcIndex];
-                            }}
-                        }}
-                    }} else {{
-                        outputFloat32 = sourceFloat32;
-                        outputLength = sourceFloat32.length;
-                    }}
-                    
-                    // Create audio buffer at the correct sample rate
-                    const audioBuffer = audioContext.createBuffer(1, outputLength, targetSampleRate);
-                    audioBuffer.getChannelData(0).set(outputFloat32);
-                    
-                    // Add to queue instead of playing immediately
-                    audioQueue.push(audioBuffer);
-                    
-                    // Start playing if not already playing
-                    if (!isPlaying) {{
-                        playNextInQueue();
-                    }}
-                    
-                }} catch (error) {{
-                    console.error('Audio playback error:', error);
-                }}
-            }}
-            
-            // Start everything
+            // Start
             initAudio();
+            
         </script>
     </body>
     </html>
     """
     
-    components.html(component_html, height=120)
+    return components.html(component_html, height=120)
