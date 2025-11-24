@@ -16,11 +16,29 @@ logging.basicConfig(level=logging.ERROR)
 os.environ["GRPC_VERBOSITY"] = "ERROR"
 os.environ["GLOG_minloglevel"] = "2"
 
+# Load .env file (for local development only - Railway uses environment variables directly)
 load_dotenv()
 
+# Get API key from environment (works for both local .env and Railway variables)
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if not GEMINI_API_KEY:
-    raise ValueError('Missing GEMINI_API_KEY in .env file.')
+    st.error("❌ Missing GEMINI_API_KEY!")
+    st.info("""
+    **For Railway Deployment:**
+    1. Go to your Railway project dashboard
+    2. Click on your service
+    3. Go to the **Variables** tab
+    4. Click **New Variable**
+    5. Add: `GEMINI_API_KEY` = `your_actual_api_key`
+    6. Click **Deploy** or wait for auto-redeploy
+    
+    **For Local Development:**
+    Create a `.env` file with:
+    ```
+    GEMINI_API_KEY=your_actual_api_key
+    ```
+    """)
+    st.stop()
 
 # AUDIO CONFIGURATION (Matching local bot)
 INPUT_RATE = 16000
@@ -217,9 +235,10 @@ st.caption("Real-time voice chat with low latency")
 
 def find_free_port(start_port=8765):
     """Find an available port starting from start_port"""
-    # On Hugging Face Spaces, use the default port
-    if is_huggingface():
-        return 7860  # Hugging Face Spaces default Streamlit port
+    # Check if we're on Railway (or similar cloud platform)
+    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("PORT"):
+        # Use the PORT env variable if available
+        return int(os.getenv("PORT", 8765))
     
     port = start_port
     while port < start_port + 100:
@@ -231,19 +250,18 @@ def find_free_port(start_port=8765):
             port += 1
     return start_port  # Fallback
 
-def is_huggingface():
-    """Detect if running on Hugging Face Spaces"""
-    return os.getenv("SPACE_ID") is not None
+def is_railway():
+    """Detect if running on Railway"""
+    return os.getenv("RAILWAY_ENVIRONMENT") is not None
 
 def get_websocket_url(port):
     """Get the correct WebSocket URL for current environment"""
-    if is_huggingface():
-        # On Hugging Face Spaces, use the same hostname as the Streamlit app
-        # Get the current page URL from browser
-        space_host = os.getenv("SPACE_HOST", "")
-        if space_host:
-            return f"wss://{space_host}"
-        # Fallback: client will connect to same host on same port
+    if is_railway():
+        # On Railway, use the same hostname as the Streamlit app
+        railway_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+        if railway_url:
+            return f"wss://{railway_url}"
+        # Fallback: client will connect to same host
         return f"ws://{{window.location.hostname}}:{port}"
     else:
         # Local development
@@ -295,12 +313,7 @@ with col2:
 
 # Display status
 if st.session_state.is_running:
-    # Get the correct WebSocket URL for the environment
-    if is_huggingface():
-        # For Hugging Face, use JavaScript to get current hostname
-        ws_url = "ws://" + "" + ":" + str(st.session_state.ws_port)  # Will be filled by JavaScript
-    else:
-        ws_url = f"ws://localhost:{st.session_state.ws_port}"
+    ws_url = get_websocket_url(st.session_state.ws_port)
     
     st.success(f"✅ Bot is running. Allow microphone access in your browser...")
     
