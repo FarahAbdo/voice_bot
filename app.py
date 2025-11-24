@@ -205,18 +205,30 @@ def is_cloud_deployment():
 # Get WebSocket configuration  
 def get_websocket_config():
     """Get WebSocket URL and port - works for both local and cloud"""
-    # Use environment variable for port if available (cloud deployment)
-    port = int(os.getenv('WS_PORT', find_free_port()))
-    
-    # For cloud, use the app's own hostname; for local, use localhost
     if is_cloud_deployment():
-        # On Streamlit Cloud, WebSocket server runs on same host
-        hostname = os.getenv('STREAMLIT_SERVER_HEADLESS', 'localhost')
-        ws_url = f"ws://{hostname}:{port}"
+        # On Streamlit Cloud, use external WebSocket server from secrets
+        try:
+            ws_url = st.secrets.get("WEBSOCKET_URL", os.getenv("WEBSOCKET_URL", ""))
+            if not ws_url:
+                st.error("⚠️ WEBSOCKET_URL not configured in Streamlit secrets!")
+                st.info("Add WEBSOCKET_URL to your Streamlit secrets. See DEPLOYMENT.md for instructions.")
+                return None, None
+            # Extract port if present, otherwise use None (standard ports)
+            import re
+            match = re.match(r'wss?://([^:]+):?(\d+)?', ws_url)
+            if match:
+                port = int(match.group(2)) if match.group(2) else None
+            else:
+                port = None
+            return ws_url, port
+        except Exception as e:
+            st.error(f"❌ Error reading WEBSOCKET_URL: {e}")
+            return None, None
     else:
+        # Local deployment - run WebSocket server locally
+        port = find_free_port()
         ws_url = f"ws://localhost:{port}"
-    
-    return ws_url, port
+        return ws_url, port
 
 def find_free_port(start_port=8765):
     """Find an available port starting from start_port"""
@@ -261,7 +273,10 @@ else:
 col1, col2 = st.columns(2)
 
 with col1:
-    if st.button("▶️ Start Bot", disabled=st.session_state.is_running):
+    # Disable button if no WebSocket URL configured on cloud
+    button_disabled = st.session_state.is_running or (is_cloud_deployment() and not st.session_state.ws_url)
+    
+    if st.button("▶️ Start Bot", disabled=button_disabled):
         # Create log queue for thread-safe communication
         st.session_state.log_queue = queue_module.Queue()
         
@@ -270,13 +285,15 @@ with col1:
         st.session_state.is_running = True
         st.session_state.logs = []
         
-        # Start bot in a separate thread
-        st.session_state.bot_thread = threading.Thread(
-            target=run_bot_in_thread,
-            args=(st.session_state.bot, st.session_state.ws_port),
-            daemon=True
-        )
-        st.session_state.bot_thread.start()
+        # Only start WebSocket server thread if running locally
+        # On cloud, we connect to external WebSocket server
+        if not is_cloud_deployment():
+            st.session_state.bot_thread = threading.Thread(
+                target=run_bot_in_thread,
+                args=(st.session_state.bot, st.session_state.ws_port),
+                daemon=True
+            )
+            st.session_state.bot_thread.start()
         st.rerun()
 
 with col2:
@@ -321,5 +338,5 @@ with log_container:
 # Auto-refresh while bot is running
 if st.session_state.is_running:
     import time
-    time.sleep(0.3)  # Faster refresh for lower perceived latency
+    time.sleep(0.03)  # Faster refresh for lower perceived latency
     st.rerun()
