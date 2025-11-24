@@ -1,18 +1,17 @@
 import os
 import asyncio
-import pyaudio
-import sys
 import logging
-import traceback
-import threading
-import queue
 import streamlit as st
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+import websockets
+import threading
+import queue as queue_module
+import socket
+from audio_component import audio_component
 
-# 1. SETUP & LOGGING CLEANUP
-# Hides the messy internal logs
+# SETUP & LOGGING CLEANUP
 logging.basicConfig(level=logging.ERROR)
 os.environ["GRPC_VERBOSITY"] = "ERROR"
 os.environ["GLOG_minloglevel"] = "2"
@@ -23,12 +22,11 @@ GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if not GEMINI_API_KEY:
     raise ValueError('Missing GEMINI_API_KEY in .env file.')
 
-# 2. AUDIO CONFIGURATION (Optimized for Realtime)
-INPUT_RATE = 16000
-OUTPUT_RATE = 24000
-CHUNK_SIZE = 512  # Small buffer = Low Latency
+# AUDIO CONFIGURATION
+INPUT_RATE = 16000  # Browser captures at 16kHz
+OUTPUT_RATE = 24000  # Gemini outputs at 24kHz
 
-# 3. SYSTEM PROMPT (Jordanian Dialect)
+# SYSTEM PROMPT (Jordanian Dialect)
 SYSTEM_INSTRUCTION = (
     "You are a helpful voice assistant BE FRIENDLY and helpful voice assistant. "
     "Speak naturally and conversationally. "
@@ -39,66 +37,49 @@ SYSTEM_INSTRUCTION = (
     "4. Do NOT wait. Speak immediately."
 )
 
-class GeminiLiveBot:
+class GeminiWebSocketBot:
     def __init__(self, log_queue):
         self.client = genai.Client(api_key=GEMINI_API_KEY)
-        self.audio = pyaudio.PyAudio()
-        self.input_stream = None
-        self.output_stream = None
         self.is_running = True
         self.log_queue = log_queue
+        self.websocket_clients = set()
+        self.gemini_session = None
+        self.server = None
 
     def log(self, message):
         """Send log messages to queue for Streamlit UI"""
         if self.log_queue:
             self.log_queue.put(message)
 
-    def setup_audio(self):
-        # Mic Input
-        self.input_stream = self.audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=INPUT_RATE,
-            input=True,
-            frames_per_buffer=CHUNK_SIZE
-        )
-        # Speaker Output
-        self.output_stream = self.audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=OUTPUT_RATE,
-            output=True,
-            frames_per_buffer=CHUNK_SIZE
-        )
-
-    async def send_audio_loop(self, session):
-        """Reads mic and sends to Gemini with Voice Activity Detection."""
-        self.log("🎤 Mic active. Speak now...")
-        loop = asyncio.get_running_loop()
+    async def handle_websocket_client(self, websocket):
+        """Handle incoming WebSocket connection from browser"""
+        self.websocket_clients.add(websocket)
+        self.log(f"🔌 Browser connected")
+        
         try:
-            while self.is_running:
-                # Read Audio (Non-blocking)
-                data = await loop.run_in_executor(None, self.input_stream.read, CHUNK_SIZE, False)
+            async for message in websocket:
+                # Received audio data from browser
+                if isinstance(message, bytes) and self.gemini_session:
+                    # Forward to Gemini
+                    try:
+                        await self.gemini_session.send(
+                            input={"data": message, "mime_type": "audio/pcm;rate=16000"},
+                            end_of_turn=False
+                        )
+                    except Exception as e:
+                        self.log(f"⚠️ Send error: {e}")
+                        
+        except websockets.exceptions.ConnectionClosed:
+            self.log("🔌 Browser disconnected")
+        finally:
+            self.websocket_clients.discard(websocket)
 
-                # SEND TO GEMINI
-                try:
-                    await session.send(input={"data": data, "mime_type": "audio/pcm;rate=16000"}, end_of_turn=False)
-                except Exception:
-                    # Fallback if syntax changes
-                    await session.send_realtime_input(data=data, mime_type="audio/pcm;rate=16000")
-                    
-        except Exception as e:
-            if self.is_running:
-                self.log(f"\n❌ Send Error: {e}")
-
-    async def receive_audio_loop(self, session):
-        """Receives audio and plays it."""
-        self.log("\n🎧 Ready to speak...")
-        loop = asyncio.get_running_loop()
+    async def receive_gemini_audio(self):
+        """Receive audio from Gemini and broadcast to all browser clients"""
         first_part = True
         try:
-            while self.is_running:
-                async for response in session.receive():
+            while self.is_running and self.gemini_session:
+                async for response in self.gemini_session.receive():
                     server_content = response.server_content
                     
                     if server_content is None:
@@ -107,11 +88,12 @@ class GeminiLiveBot:
                     model_turn = server_content.model_turn
                     if model_turn:
                         for part in model_turn.parts:
-                            # 1. Play Audio (Non-blocking)
-                            if part.inline_data:
-                                await loop.run_in_executor(None, self.output_stream.write, part.inline_data.data)
+                            # 1. Send audio to all connected browsers
+                            if part.inline_data and self.websocket_clients:
+                                # Broadcast to all connected clients
+                                websockets.broadcast(self.websocket_clients, part.inline_data.data)
                             
-                            # 2. Print Text Transcript with label
+                            # 2. Log text transcript
                             if part.text:
                                 if first_part:
                                     self.log(f"🤖 Bot: {part.text}")
@@ -119,7 +101,7 @@ class GeminiLiveBot:
                                 else:
                                     self.log(part.text)
 
-                    # Turn Complete (Newline)
+                    # Turn Complete
                     if server_content.turn_complete:
                         self.log("")
                         first_part = True
@@ -128,17 +110,15 @@ class GeminiLiveBot:
             if self.is_running:
                 self.log(f"\n❌ Receive Error: {e}")
 
-    async def run(self):
-        self.setup_audio()
-        
-        # CONFIGURATION (Fixed deprecation warning)
+    async def start_gemini_session(self):
+        """Initialize Gemini connection"""
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"],
             system_instruction=types.Content(parts=[types.Part(text=SYSTEM_INSTRUCTION)]),
             speech_config=types.SpeechConfig(
                 voice_config=types.VoiceConfig(
                     prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                        voice_name="Charon" 
+                        voice_name="Charon"
                     )
                 )
             )
@@ -149,44 +129,106 @@ class GeminiLiveBot:
 
         try:
             async with self.client.aio.live.connect(model=model_id, config=config) as session:
-                self.log("✅ Connected! (Jordanian Mode)")
+                self.gemini_session = session
+                self.log("✅ Connected to Gemini! (Jordanian Mode)")
                 
-                await asyncio.gather(
-                    self.send_audio_loop(session),
-                    self.receive_audio_loop(session)
-                )
+                # Start receiving audio from Gemini
+                await self.receive_gemini_audio()
+                
         except Exception as e:
-            traceback.print_exc()
-            self.log(f"Connection Failed: {e}")
-        finally:
-            self.cleanup()
+            self.log(f"❌ Gemini connection failed: {e}")
+            import traceback
+            self.log(traceback.format_exc())
+
+    async def start_websocket_server(self, port=8765):
+        """Start WebSocket server for browser connections"""
+        self.log(f"🌐 Starting WebSocket server on port {port}...")
+        
+        # Create server with reuse_address enabled to avoid port binding issues
+        server = await websockets.serve(
+            self.handle_websocket_client, 
+            "localhost", 
+            port,
+            reuse_address=True
+        )
+        self.server = server
+        self.log(f"✅ WebSocket server running on ws://localhost:{port}")
+        
+        # Start Gemini session
+        await self.start_gemini_session()
+        
+        # Close server when done
+        server.close()
+        await server.wait_closed()
 
     def cleanup(self):
+        """Clean up resources"""
         self.is_running = False
-        if self.input_stream:
-            self.input_stream.stop_stream()
-            self.input_stream.close()
-        if self.output_stream:
-            self.output_stream.stop_stream()
-            self.output_stream.close()
-        self.audio.terminate()
+        self.gemini_session = None
+        
+        # Close server if it exists
+        if self.server:
+            self.server.close()
+        
+        # Close all websocket clients
+        for ws in list(self.websocket_clients):
+            try:
+                asyncio.create_task(ws.close())
+            except:
+                pass
+        
+        self.websocket_clients.clear()
 
-def run_bot_in_thread(bot):
+def run_bot_in_thread(bot, port):
     """Run the async bot in a separate thread"""
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    async def main():
+        await bot.start_websocket_server(port)
     
     try:
-        asyncio.run(bot.run())
+        asyncio.run(main())
     except Exception as e:
         if bot.log_queue:
             bot.log_queue.put(f"Error: {e}")
-            traceback_str = traceback.format_exc()
-            bot.log_queue.put(traceback_str)
+            import traceback
+            bot.log_queue.put(traceback.format_exc())
 
 # Streamlit UI
-st.set_page_config(page_title="Gemini Voice Assistant", page_icon="🎤")
+st.set_page_config(page_title="Gemini Voice Assistant", page_icon="🎤", layout="wide")
 st.title("🎤 Gemini Voice Assistant (Jordanian Dialect)")
+st.caption("Cloud-ready browser-based voice assistant")
+
+# Detect deployment environment
+def is_cloud_deployment():
+    """Check if running on Streamlit Cloud"""
+    return os.getenv('STREAMLIT_SHARING_MODE') is not None
+
+# Get WebSocket configuration  
+def get_websocket_config():
+    """Get WebSocket URL and port - works for both local and cloud"""
+    # Use environment variable for port if available (cloud deployment)
+    port = int(os.getenv('WS_PORT', find_free_port()))
+    
+    # For cloud, use the app's own hostname; for local, use localhost
+    if is_cloud_deployment():
+        # On Streamlit Cloud, WebSocket server runs on same host
+        hostname = os.getenv('STREAMLIT_SERVER_HEADLESS', 'localhost')
+        ws_url = f"ws://{hostname}:{port}"
+    else:
+        ws_url = f"ws://localhost:{port}"
+    
+    return ws_url, port
+
+def find_free_port(start_port=8765):
+    """Find an available port starting from start_port"""
+    port = start_port
+    while port < start_port + 100:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('localhost', port))
+                return port
+        except OSError:
+            port += 1
+    return start_port  # Fallback
 
 # Initialize session state
 if 'bot' not in st.session_state:
@@ -199,6 +241,21 @@ if 'logs' not in st.session_state:
     st.session_state.logs = []
 if 'is_running' not in st.session_state:
     st.session_state.is_running = False
+if 'ws_url' not in st.session_state:
+    st.session_state.ws_url = None
+if 'ws_port' not in st.session_state:
+    st.session_state.ws_port = None
+
+# Get WebSocket configuration
+ws_url, ws_port = get_websocket_config()
+st.session_state.ws_url = ws_url
+st.session_state.ws_port = ws_port
+
+# Show deployment info
+if is_cloud_deployment():
+    st.info("🌐 Running on Streamlit Cloud")
+else:
+    st.info("💻 Running locally")
 
 # Control buttons
 col1, col2 = st.columns(2)
@@ -206,17 +263,17 @@ col1, col2 = st.columns(2)
 with col1:
     if st.button("▶️ Start Bot", disabled=st.session_state.is_running):
         # Create log queue for thread-safe communication
-        st.session_state.log_queue = queue.Queue()
+        st.session_state.log_queue = queue_module.Queue()
         
         # Create bot instance with log queue
-        st.session_state.bot = GeminiLiveBot(log_queue=st.session_state.log_queue)
+        st.session_state.bot = GeminiWebSocketBot(log_queue=st.session_state.log_queue)
         st.session_state.is_running = True
         st.session_state.logs = []
         
         # Start bot in a separate thread
         st.session_state.bot_thread = threading.Thread(
-            target=run_bot_in_thread, 
-            args=(st.session_state.bot,),
+            target=run_bot_in_thread,
+            args=(st.session_state.bot, st.session_state.ws_port),
             daemon=True
         )
         st.session_state.bot_thread.start()
@@ -232,7 +289,11 @@ with col2:
 
 # Display status
 if st.session_state.is_running:
-    st.success("✅ Bot is running. Speak into your microphone...")
+    st.success("✅ Bot is running. Allow microphone access in your browser...")
+    
+    # Embed audio component
+    st.subheader("Audio Interface")
+    audio_component(st.session_state.ws_url)
 else:
     st.info("Press 'Start Bot' to begin")
 
@@ -242,7 +303,7 @@ if st.session_state.log_queue:
         while True:
             message = st.session_state.log_queue.get_nowait()
             st.session_state.logs.append(message)
-    except queue.Empty:
+    except queue_module.Empty:
         pass
 
 # Display logs
@@ -251,7 +312,8 @@ log_container = st.container()
 
 with log_container:
     if st.session_state.logs:
-        for log in st.session_state.logs:
+        # Show last 20 messages for performance
+        for log in st.session_state.logs[-20:]:
             st.write(log)
     else:
         st.write("No conversation yet. Start the bot to begin.")
@@ -259,5 +321,5 @@ with log_container:
 # Auto-refresh while bot is running
 if st.session_state.is_running:
     import time
-    time.sleep(0.5)
+    time.sleep(0.3)  # Faster refresh for lower perceived latency
     st.rerun()
