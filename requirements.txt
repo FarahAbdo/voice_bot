@@ -1,7 +1,6 @@
-streamlit>=1.31.0
-google-genai>=0.8.0
-audio-recorder-streamlit>=0.0.8
-google-genai
 streamlit
+streamlit-webrtc
+google-genai
+av
+numpy
 python-dotenv
-scipy
