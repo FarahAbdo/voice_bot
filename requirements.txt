@@ -1,4 +1,7 @@
-streamlit>=1.39.0
+streamlit
+streamlit-webrtc
 google-genai
-python-dotenv
+av
 numpy
+python-dotenv
+twilio
