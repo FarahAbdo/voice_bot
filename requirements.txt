@@ -1,7 +1,3 @@
-streamlit
+pyaudio
 google-genai
 python-dotenv
-numpy
-scipy
-pyaudio
-websockets==12.0
