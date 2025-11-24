@@ -1,6 +1,6 @@
-pyaudio
-numpy
-google-genai>=0.2.0
+txtstreamlit>=1.31.0
+google-genai>=0.8.0
 python-dotenv>=1.0.0
-streamlit>=1.28.0
-websockets>=12.0
+audio-recorder-streamlit>=0.0.8
+numpy>=1.24.0
+scipy>=1.10.0
