@@ -1,6 +1,4 @@
-streamlit
-streamlit-webrtc
+streamlit>=1.39.0
 google-genai
-av
-numpy
 python-dotenv
+numpy
