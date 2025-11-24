@@ -3,316 +3,335 @@ import streamlit.components.v1 as components
 import os
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-# Page configuration
 st.set_page_config(
-    page_title="Gemini Live Voice Assistant",
+    page_title="Gemini Live Voice",
     page_icon="🎤",
-    layout="centered"
+    layout="wide"
 )
 
-# Get API key
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY') or st.secrets.get("GEMINI_API_KEY", "")
-
+# Get API key from secrets or env
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 if not GEMINI_API_KEY:
-    st.error("❌ Missing GEMINI_API_KEY. Please add it to Streamlit secrets or .env file.")
-    st.stop()
+    try:
+        GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    except:
+        st.error("❌ Missing GEMINI_API_KEY")
+        st.stop()
 
-# System prompt
-SYSTEM_INSTRUCTION = (
-    "You are a helpful voice assistant BE FRIENDLY and helpful voice assistant. "
-    "Speak naturally and conversationally. "
-    "Keep your responses clear and concise, but feel free to be warm and engaging. "
-    "1. Speak ONLY in Jordanian Arabic (Ammani dialect). "
-    "2. Use words like: 'هسا', 'بدي', 'إيش', 'طيب'. "
-    "3. Keep responses extremely short (maximum 1 sentence). "
-    "4. Do NOT wait. Speak immediately."
-)
+SYSTEM_INSTRUCTION = """You are a helpful voice assistant BE FRIENDLY and helpful voice assistant. Speak naturally and conversationally. Keep your responses clear and concise, but feel free to be warm and engaging.1. Speak ONLY in Jordanian Arabic (Ammani dialect). 2. Use words like: 'هسا', 'بدي', 'إيش', 'طيب'. 3. Keep responses extremely short (maximum 1 sentence). 4. Do NOT wait. Speak immediately."""
 
-# Title
-st.title("🎤 Gemini Live Voice Assistant")
-st.markdown("**Real-time Jordanian Arabic Voice Bot** - Just speak and get instant responses!")
-
-# HTML/JavaScript for live audio streaming
+# Full HTML/JS implementation
 html_code = f"""
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
     <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
         body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
             display: flex;
             justify-content: center;
             align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            padding: 20px;
         }}
         .container {{
             background: white;
             border-radius: 20px;
             padding: 40px;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 600px;
+            max-width: 800px;
             width: 100%;
+        }}
+        h1 {{
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
         }}
         .status {{
             text-align: center;
+            padding: 15px;
             margin: 20px 0;
+            border-radius: 10px;
             font-size: 18px;
             font-weight: bold;
         }}
-        .status.idle {{ color: #666; }}
-        .status.listening {{ color: #4CAF50; }}
-        .status.speaking {{ color: #2196F3; }}
-        .status.error {{ color: #f44336; }}
+        .status.idle {{ background: #f5f5f5; color: #666; }}
+        .status.connecting {{ background: #fff3cd; color: #856404; }}
+        .status.connected {{ background: #d4edda; color: #155724; }}
+        .status.listening {{ background: #d1ecf1; color: #0c5460; }}
+        .status.speaking {{ background: #cce5ff; color: #004085; }}
+        .status.error {{ background: #f8d7da; color: #721c24; }}
         
+        .controls {{
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin: 20px 0;
+        }}
         .btn {{
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+            padding: 15px 30px;
+            font-size: 16px;
             border: none;
-            padding: 20px 40px;
-            font-size: 18px;
-            border-radius: 50px;
+            border-radius: 10px;
             cursor: pointer;
-            transition: all 0.3s;
-            width: 100%;
-            margin: 10px 0;
             font-weight: bold;
+            transition: all 0.3s;
         }}
-        .btn:hover {{
-            transform: scale(1.05);
-            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        .btn-start {{
+            background: #28a745;
+            color: white;
         }}
+        .btn-start:hover {{ background: #218838; }}
+        .btn-stop {{
+            background: #dc3545;
+            color: white;
+        }}
+        .btn-stop:hover {{ background: #c82333; }}
         .btn:disabled {{
             background: #ccc;
             cursor: not-allowed;
-            transform: none;
         }}
         
         .transcript {{
-            background: #f5f5f5;
-            padding: 20px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
             border-radius: 10px;
-            margin: 20px 0;
-            min-height: 100px;
-            max-height: 300px;
+            padding: 20px;
+            min-height: 300px;
+            max-height: 400px;
             overflow-y: auto;
+            margin: 20px 0;
         }}
         .message {{
             margin: 10px 0;
-            padding: 10px;
+            padding: 10px 15px;
             border-radius: 8px;
+            animation: fadeIn 0.3s;
         }}
-        .user {{ 
-            background: #e3f2fd; 
-            text-align: right;
+        .message.bot {{
+            background: #e7f3ff;
+            border-left: 4px solid #2196F3;
         }}
-        .bot {{ 
-            background: #f1f8e9;
-            color: #2e7d32;
-            font-weight: bold;
+        .message.user {{
+            background: #f0f0f0;
+            border-left: 4px solid #666;
         }}
-        
-        .pulse {{
-            animation: pulse 1.5s infinite;
+        @keyframes fadeIn {{
+            from {{ opacity: 0; transform: translateY(10px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
         }}
-        @keyframes pulse {{
-            0%, 100% {{ opacity: 1; }}
-            50% {{ opacity: 0.5; }}
+        .empty {{
+            text-align: center;
+            color: #999;
+            padding: 50px;
         }}
     </style>
 </head>
 <body>
     <div class="container">
-        <div id="status" class="status idle">🎤 Ready to start</div>
-        <div id="transcript" class="transcript">
-            <div style="text-align: center; color: #999;">Your conversation will appear here...</div>
+        <h1>🎤 Gemini Live Voice Assistant</h1>
+        
+        <div id="status" class="status idle">
+            Ready to connect
         </div>
-        <button id="startBtn" class="btn">🎤 Start Conversation</button>
-        <button id="stopBtn" class="btn" style="display:none;">⏹️ Stop</button>
+        
+        <div class="controls">
+            <button id="startBtn" class="btn btn-start">🎙️ Start Conversation</button>
+            <button id="stopBtn" class="btn btn-stop" disabled>⏹️ Stop</button>
+        </div>
+        
+        <div id="transcript" class="transcript">
+            <div class="empty">Your conversation will appear here...</div>
+        </div>
     </div>
 
+    <script type="importmap">
+    {{
+        "imports": {{
+            "@google/generative-ai": "https://esm.run/@google/generative-ai"
+        }}
+    }}
+    </script>
+
     <script type="module">
-        const API_KEY = '{GEMINI_API_KEY}';
-        const MODEL = 'gemini-2.0-flash-exp';
+        import {{ GoogleGenerativeAI }} from "@google/generative-ai";
+
+        const API_KEY = "{GEMINI_API_KEY}";
+        const MODEL = "gemini-2.0-flash-exp";
         const SYSTEM_INSTRUCTION = `{SYSTEM_INSTRUCTION}`;
-        
-        let ws = null;
-        let audioContext = null;
-        let mediaStream = null;
-        let processor = null;
-        
+
+        let client;
+        let session;
+        let audioContext;
+        let mediaStream;
+        let audioWorkletNode;
+        let isRunning = false;
+
         const statusDiv = document.getElementById('status');
         const transcriptDiv = document.getElementById('transcript');
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
-        
-        function updateStatus(message, className) {{
-            statusDiv.textContent = message;
+
+        function updateStatus(text, className) {{
+            statusDiv.textContent = text;
             statusDiv.className = `status ${{className}}`;
         }}
-        
+
         function addMessage(text, isBot = false) {{
+            if (transcriptDiv.querySelector('.empty')) {{
+                transcriptDiv.innerHTML = '';
+            }}
             const msg = document.createElement('div');
             msg.className = `message ${{isBot ? 'bot' : 'user'}}`;
             msg.textContent = `${{isBot ? '🤖 Bot: ' : '👤 You: '}}${{text}}`;
             transcriptDiv.appendChild(msg);
             transcriptDiv.scrollTop = transcriptDiv.scrollHeight;
         }}
-        
-        async function startLiveSession() {{
+
+        async function startConversation() {{
             try {{
-                updateStatus('🔄 Connecting...', 'idle');
-                
-                // Request microphone access
-                mediaStream = await navigator.mediaDevices.getUserMedia({{ 
-                    audio: {{ 
+                updateStatus('🔄 Connecting to Gemini...', 'connecting');
+                startBtn.disabled = true;
+
+                // Initialize Gemini client
+                client = new GoogleGenerativeAI(API_KEY);
+                const model = client.getGenerativeModel({{ model: MODEL }});
+
+                // Start live session
+                session = await model.startChat({{
+                    generationConfig: {{
+                        responseModalities: "audio",
+                        speechConfig: {{
+                            voiceConfig: {{
+                                prebuiltVoiceConfig: {{
+                                    voiceName: "Charon"
+                                }}
+                            }}
+                        }}
+                    }},
+                    systemInstruction: {{
+                        parts: [{{ text: SYSTEM_INSTRUCTION }}]
+                    }}
+                }});
+
+                // Request microphone
+                mediaStream = await navigator.mediaDevices.getUserMedia({{
+                    audio: {{
                         channelCount: 1,
                         sampleRate: 16000,
                         echoCancellation: true,
-                        noiseSuppression: true
-                    }} 
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }}
                 }});
-                
+
                 // Setup audio context
-                audioContext = new AudioContext({{ sampleRate: 16000 }});
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({{
+                    sampleRate: 16000
+                }});
+
                 const source = audioContext.createMediaStreamSource(mediaStream);
-                processor = audioContext.createScriptProcessor(4096, 1, 1);
-                
-                // Connect to Gemini WebSocket
-                const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${{API_KEY}}`;
-                ws = new WebSocket(url);
-                
-                ws.onopen = () => {{
-                    updateStatus('✅ Connected! Speak now...', 'listening');
-                    startBtn.style.display = 'none';
-                    stopBtn.style.display = 'block';
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                processor.onaudioprocess = async (e) => {{
+                    if (!isRunning) return;
                     
-                    // Send setup message
-                    ws.send(JSON.stringify({{
-                        setup: {{
-                            model: `models/${{MODEL}}`,
-                            generation_config: {{
-                                response_modalities: ["AUDIO"],
-                                speech_config: {{
-                                    voice_config: {{
-                                        prebuilt_voice_config: {{
-                                            voice_name: "Charon"
-                                        }}
-                                    }}
-                                }}
-                            }},
-                            system_instruction: {{
-                                parts: [{{ text: SYSTEM_INSTRUCTION }}]
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    const pcm16 = convertFloat32ToInt16(inputData);
+                    
+                    try {{
+                        // Send audio to Gemini
+                        const result = await session.sendMessage([{{
+                            inlineData: {{
+                                mimeType: "audio/pcm",
+                                data: arrayBufferToBase64(pcm16.buffer)
                             }}
-                        }}
-                    }}));
-                }};
-                
-                ws.onmessage = async (event) => {{
-                    const response = JSON.parse(event.data);
-                    
-                    if (response.serverContent) {{
-                        const parts = response.serverContent.modelTurn?.parts || [];
-                        
-                        for (const part of parts) {{
-                            // Handle text
-                            if (part.text) {{
-                                addMessage(part.text, true);
+                        }}]);
+
+                        // Process response
+                        for await (const chunk of result.stream) {{
+                            const text = chunk.text();
+                            if (text) {{
+                                addMessage(text, true);
                             }}
                             
-                            // Handle audio
-                            if (part.inlineData?.data) {{
-                                updateStatus('🔊 Bot speaking...', 'speaking');
-                                await playAudio(part.inlineData.data);
-                                updateStatus('🎤 Listening...', 'listening');
+                            // Play audio if available
+                            if (chunk.candidates?.[0]?.content?.parts) {{
+                                for (const part of chunk.candidates[0].content.parts) {{
+                                    if (part.inlineData?.data) {{
+                                        updateStatus('🔊 Bot speaking...', 'speaking');
+                                        await playAudio(part.inlineData.data);
+                                        updateStatus('🎤 Listening...', 'listening');
+                                    }}
+                                }}
                             }}
                         }}
+                    }} catch (err) {{
+                        console.error('Send error:', err);
                     }}
                 }};
-                
-                ws.onerror = (error) => {{
-                    updateStatus('❌ Connection error', 'error');
-                    console.error('WebSocket error:', error);
-                    stopLiveSession();
-                }};
-                
-                ws.onclose = () => {{
-                    updateStatus('🔌 Disconnected', 'idle');
-                    stopLiveSession();
-                }};
-                
-                // Send audio data
-                processor.onaudioprocess = (e) => {{
-                    if (ws && ws.readyState === WebSocket.OPEN) {{
-                        const inputData = e.inputBuffer.getChannelData(0);
-                        const pcm16 = convertFloat32ToInt16(inputData);
-                        const base64Audio = arrayBufferToBase64(pcm16.buffer);
-                        
-                        ws.send(JSON.stringify({{
-                            realtimeInput: {{
-                                mediaChunks: [{{
-                                    data: base64Audio,
-                                    mimeType: "audio/pcm"
-                                }}]
-                            }}
-                        }}));
-                    }}
-                }};
-                
+
                 source.connect(processor);
                 processor.connect(audioContext.destination);
-                
+
+                isRunning = true;
+                stopBtn.disabled = false;
+                updateStatus('✅ Connected! Speak now...', 'listening');
+
             }} catch (error) {{
-                updateStatus('❌ Error: ' + error.message, 'error');
-                console.error('Setup error:', error);
+                console.error('Start error:', error);
+                updateStatus(`❌ Error: ${{error.message}}`, 'error');
+                startBtn.disabled = false;
             }}
         }}
-        
-        function stopLiveSession() {{
-            if (ws) {{
-                ws.close();
-                ws = null;
-            }}
-            if (processor) {{
-                processor.disconnect();
-                processor = null;
-            }}
+
+        function stopConversation() {{
+            isRunning = false;
+            
             if (mediaStream) {{
                 mediaStream.getTracks().forEach(track => track.stop());
-                mediaStream = null;
             }}
             if (audioContext) {{
                 audioContext.close();
-                audioContext = null;
             }}
             
-            startBtn.style.display = 'block';
-            stopBtn.style.display = 'none';
-            updateStatus('🎤 Ready to start', 'idle');
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            updateStatus('🔌 Disconnected', 'idle');
         }}
-        
+
         async function playAudio(base64Audio) {{
-            const audioData = base64ToArrayBuffer(base64Audio);
-            const audioCtx = new AudioContext({{ sampleRate: 24000 }});
-            const audioBuffer = await audioCtx.decodeAudioData(audioData);
-            const source = audioCtx.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioCtx.destination);
-            
-            return new Promise((resolve) => {{
-                source.onended = () => {{
-                    audioCtx.close();
-                    resolve();
-                }};
-                source.start();
-            }});
+            try {{
+                const audioData = base64ToArrayBuffer(base64Audio);
+                const playContext = new (window.AudioContext || window.webkitAudioContext)({{
+                    sampleRate: 24000
+                }});
+                const audioBuffer = await playContext.decodeAudioData(audioData);
+                const source = playContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(playContext.destination);
+                
+                return new Promise((resolve) => {{
+                    source.onended = () => {{
+                        playContext.close();
+                        resolve();
+                    }};
+                    source.start(0);
+                }});
+            }} catch (err) {{
+                console.error('Play audio error:', err);
+            }}
         }}
-        
+
         function convertFloat32ToInt16(buffer) {{
             const int16 = new Int16Array(buffer.length);
             for (let i = 0; i < buffer.length; i++) {{
@@ -321,7 +340,7 @@ html_code = f"""
             }}
             return int16;
         }}
-        
+
         function arrayBufferToBase64(buffer) {{
             const bytes = new Uint8Array(buffer);
             let binary = '';
@@ -330,7 +349,7 @@ html_code = f"""
             }}
             return btoa(binary);
         }}
-        
+
         function base64ToArrayBuffer(base64) {{
             const binaryString = atob(base64);
             const bytes = new Uint8Array(binaryString.length);
@@ -339,35 +358,32 @@ html_code = f"""
             }}
             return bytes.buffer;
         }}
-        
-        startBtn.onclick = startLiveSession;
-        stopBtn.onclick = stopLiveSession;
+
+        startBtn.onclick = startConversation;
+        stopBtn.onclick = stopConversation;
     </script>
 </body>
 </html>
 """
 
-# Display the live voice interface
-components.html(html_code, height=600, scrolling=False)
-
-# Instructions
-st.markdown("---")
-with st.expander("ℹ️ How to use"):
-    st.markdown("""
-    1. Click "Start Conversation" to begin
-    2. Allow microphone access when prompted
-    3. Speak naturally in Jordanian Arabic
-    4. The bot will respond in real-time with audio
-    5. Click "Stop" when you're done
-    
-    **Features:**
-    - ✅ Real-time voice streaming (no recording needed)
-    - ✅ Instant audio responses
-    - ✅ Conversation transcript
-    - ✅ Jordanian Arabic dialect
-    
-    **Note:** Make sure to add your `GEMINI_API_KEY` to Streamlit secrets.
-    """)
+components.html(html_code, height=700, scrolling=False)
 
 st.markdown("---")
-st.markdown("Built with ❤️ using Streamlit and Google Gemini 2.0")
+st.info("""
+### 📝 Setup Instructions for Streamlit Cloud:
+
+1. **Create `requirements.txt`:**
+   ```
+   streamlit
+   python-dotenv
+   ```
+
+2. **Add API Key to Secrets:**
+   - Go to your app settings in Streamlit Cloud
+   - Navigate to "Secrets"
+   - Add: `GEMINI_API_KEY = "your-api-key-here"`
+
+3. **Deploy!** The app will work just like your local version! 🚀
+
+**This uses the exact same Gemini Live API as your local code, but in the browser!**
+""")
