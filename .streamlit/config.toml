@@ -6,16 +6,3 @@ enableXsrfProtection = false
 
 [browser]
 gatherUsageStats = false
-```
-
-## Your Project Structure Should Look Like This:
-```
-your-project/
-├── .streamlit/
-│   └── config.toml
-├── main.py
-├── audio_component.py
-├── requirements.txt
-├── Procfile
-├── railway.json
-└── .gitignore
