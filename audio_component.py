@@ -1,13 +1,20 @@
 import streamlit.components.v1 as components
 
-def audio_component(ws_url, key=None):
+def audio_component(ws_url, port=None, key=None):
     """
     Custom Streamlit component for real-time audio streaming via WebSocket.
     
     Args:
-        ws_url: WebSocket URL to connect to for bidirectional audio streaming
+        ws_url: WebSocket URL template (may contain placeholder for hostname)
+        port: WebSocket port number (optional, for dynamic URL construction)
         key: Optional unique key for the component
     """
+    # If port is provided, construct URL dynamically in JavaScript
+    if port:
+        ws_url_template = f"ws://{{{{window.location.hostname}}}}:{port}"
+    else:
+        ws_url_template = ws_url
+    
     html_code = f"""
     <!DOCTYPE html>
     <html>
@@ -250,7 +257,9 @@ def audio_component(ws_url, key=None):
             }}
 
             // Initialize when page loads
-            initAudio('{ws_url}');
+            // Resolve the WebSocket URL (replace template placeholders)
+            const wsUrl = '{ws_url_template}'.replace('{{{{window.location.hostname}}}}', window.location.hostname);
+            initAudio(wsUrl);
         </script>
     </body>
     </html>
