@@ -34,9 +34,9 @@ if not GEMINI_API_KEY:
     
     **For Local Development:**
     Create a `.env` file with:
-    ```
+```
     GEMINI_API_KEY=your_actual_api_key
-    ```
+```
     """)
     st.stop()
 
